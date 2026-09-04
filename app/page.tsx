@@ -75,7 +75,7 @@ export default function Home() {
     }
   }
 
-  async function processImage(dataUrl: string) {
+  async function processImage(dataUrl: string, sourceLabel: string) {
     setPhase('working');
     try {
       setStatusText('Lecture du texte en cours (cela peut prendre quelques secondes)…');
@@ -87,7 +87,7 @@ export default function Home() {
       if (els.length === 0) {
         setPhase('error');
         setErrorMessage(
-          "Aucun texte n'a été trouvé sur cette zone. Réessayez avec une capture ou une sélection contenant du texte."
+          `Aucun texte n'a été trouvé sur ${sourceLabel}. Réessayez avec une capture ou une sélection contenant du texte.`
         );
         return;
       }
@@ -107,14 +107,14 @@ export default function Home() {
   }
 
   function handleReadAll() {
-    if (capturedImage) processImage(capturedImage);
+    if (capturedImage) processImage(capturedImage, "l'écran entier");
   }
 
   async function handleReadSelection(rect: CropRect) {
     if (!capturedImage) return;
     try {
       const cropped = await cropImage(capturedImage, rect);
-      await processImage(cropped);
+      await processImage(cropped, 'la zone sélectionnée');
     } catch (err) {
       setPhase('error');
       const message = err instanceof Error ? err.message : 'Une erreur est survenue.';

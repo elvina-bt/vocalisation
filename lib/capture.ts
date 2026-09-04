@@ -41,7 +41,44 @@ export async function captureFrame(stream: MediaStream): Promise<CapturedFrame> 
 
   stream.getTracks().forEach((track) => track.stop());
 
+  if (isLikelyBlankFrame(ctx, width, height)) {
+    throw new Error(
+      "La capture semble vide ou uniformément noire. Sur Mac, ouvrez Réglages Système > " +
+        'Confidentialité et sécurité > Enregistrement d\'écran, activez votre navigateur dans ' +
+        'la liste, puis redémarrez-le et réessayez.'
+    );
+  }
+
   return { dataUrl: canvas.toDataURL('image/png'), width, height };
+}
+
+// Détecte une image quasiment unie (typiquement un écran noir renvoyé quand le
+// navigateur n'a pas la permission système d'enregistrer l'écran, sur Mac notamment).
+function isLikelyBlankFrame(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): boolean {
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const totalPixels = width * height;
+  const targetSamples = 5000;
+  const step = Math.max(1, Math.floor(totalPixels / targetSamples));
+
+  let sum = 0;
+  let sumSq = 0;
+  let count = 0;
+
+  for (let p = 0; p < totalPixels; p += step) {
+    const idx = p * 4;
+    const luminance = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    sum += luminance;
+    sumSq += luminance * luminance;
+    count += 1;
+  }
+
+  const mean = sum / count;
+  const variance = sumSq / count - mean * mean;
+  return variance < 4;
 }
 
 export interface CropRect {
