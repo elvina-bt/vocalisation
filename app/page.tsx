@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { requestScreenStream, captureFrame } from '@/lib/capture';
+import { requestScreenStream, captureFrame, cropImage, CropRect } from '@/lib/capture';
 import { recognizeImage } from '@/lib/ocr';
 import { buildElements, StructuredElement } from '@/lib/structure';
 import {
@@ -13,7 +13,7 @@ import {
   pickFrenchVoice,
 } from '@/lib/speech';
 
-type Phase = 'idle' | 'working' | 'reading' | 'paused' | 'done' | 'error';
+type Phase = 'idle' | 'working' | 'preview' | 'reading' | 'paused' | 'done' | 'error';
 
 export default function Home() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -22,6 +22,7 @@ export default function Home() {
   const [elements, setElements] = useState<StructuredElement[] | null>(null);
   const [rate, setRate] = useState<SpeechRate>('normal');
   const [supported, setSupported] = useState(true);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   const readerRef = useRef<ScreenReader | null>(null);
 
@@ -54,6 +55,7 @@ export default function Home() {
   async function handleCapture() {
     setErrorMessage(null);
     setElements(null);
+    setCapturedImage(null);
     setPhase('working');
 
     try {
@@ -61,8 +63,21 @@ export default function Home() {
       const stream = await requestScreenStream();
 
       setStatusText('Capture en cours…');
-      const dataUrl = await captureFrame(stream);
+      const { dataUrl } = await captureFrame(stream);
 
+      setCapturedImage(dataUrl);
+      setStatusText('Capture prête.');
+      setPhase('preview');
+    } catch (err) {
+      setPhase('error');
+      const message = err instanceof Error ? err.message : 'Une erreur est survenue.';
+      setErrorMessage(message);
+    }
+  }
+
+  async function processImage(dataUrl: string) {
+    setPhase('working');
+    try {
       setStatusText('Lecture du texte en cours (cela peut prendre quelques secondes)…');
       const words = await recognizeImage(dataUrl, (progress) => {
         setStatusText(`Analyse du texte… ${Math.round(progress * 100)}%`);
@@ -72,7 +87,7 @@ export default function Home() {
       if (els.length === 0) {
         setPhase('error');
         setErrorMessage(
-          "Aucun texte n'a été trouvé sur cette capture. Réessayez avec un écran contenant du texte à lire."
+          "Aucun texte n'a été trouvé sur cette zone. Réessayez avec une capture ou une sélection contenant du texte."
         );
         return;
       }
@@ -84,6 +99,22 @@ export default function Home() {
 
       readerRef.current?.load(texts, rate, voice);
       readerRef.current?.start();
+    } catch (err) {
+      setPhase('error');
+      const message = err instanceof Error ? err.message : 'Une erreur est survenue.';
+      setErrorMessage(message);
+    }
+  }
+
+  function handleReadAll() {
+    if (capturedImage) processImage(capturedImage);
+  }
+
+  async function handleReadSelection(rect: CropRect) {
+    if (!capturedImage) return;
+    try {
+      const cropped = await cropImage(capturedImage, rect);
+      await processImage(cropped);
     } catch (err) {
       setPhase('error');
       const message = err instanceof Error ? err.message : 'Une erreur est survenue.';
@@ -113,6 +144,7 @@ export default function Home() {
   }
 
   const isWorking = phase === 'working';
+  const isPreview = phase === 'preview';
   const isReading = phase === 'reading';
   const isPaused = phase === 'paused';
   const canCaptureAgain = phase === 'idle' || phase === 'done' || phase === 'error';
@@ -170,6 +202,14 @@ export default function Home() {
         </button>
       )}
 
+      {isPreview && capturedImage && (
+        <CropSelector
+          imageUrl={capturedImage}
+          onReadAll={handleReadAll}
+          onReadSelection={handleReadSelection}
+        />
+      )}
+
       {(isReading || isPaused) && (
         <div className="controls-row">
           <button type="button" className="big-button secondary" onClick={handlePauseResume}>
@@ -204,6 +244,105 @@ export default function Home() {
         Dock depuis le menu de votre navigateur.
       </footer>
     </main>
+  );
+}
+
+interface ScreenRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function CropSelector({
+  imageUrl,
+  onReadAll,
+  onReadSelection,
+}: {
+  imageUrl: string;
+  onReadAll: () => void;
+  onReadSelection: (rect: CropRect) => void;
+}) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
+  const [rect, setRect] = useState<ScreenRect | null>(null);
+
+  function getRelativePoint(e: React.PointerEvent) {
+    const bounds = imgRef.current!.getBoundingClientRect();
+    const x = Math.min(Math.max(e.clientX - bounds.left, 0), bounds.width);
+    const y = Math.min(Math.max(e.clientY - bounds.top, 0), bounds.height);
+    return { x, y };
+  }
+
+  function handlePointerDown(e: React.PointerEvent) {
+    const point = getRelativePoint(e);
+    dragStart.current = point;
+    setRect({ x: point.x, y: point.y, w: 0, h: 0 });
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function handlePointerMove(e: React.PointerEvent) {
+    if (!dragStart.current) return;
+    const point = getRelativePoint(e);
+    const start = dragStart.current;
+    setRect({
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      w: Math.abs(point.x - start.x),
+      h: Math.abs(point.y - start.y),
+    });
+  }
+
+  function handlePointerUp() {
+    dragStart.current = null;
+    setRect((r) => (r && r.w > 10 && r.h > 10 ? r : null));
+  }
+
+  function handleConfirmSelection() {
+    if (!rect || !imgRef.current) return;
+    const img = imgRef.current;
+    const scaleX = img.naturalWidth / img.clientWidth;
+    const scaleY = img.naturalHeight / img.clientHeight;
+    onReadSelection({
+      x: rect.x * scaleX,
+      y: rect.y * scaleY,
+      w: rect.w * scaleX,
+      h: rect.h * scaleY,
+    });
+  }
+
+  const hasSelection = !!rect && rect.w > 10 && rect.h > 10;
+
+  return (
+    <div>
+      <p className="instructions">
+        Vous pouvez délimiter à la souris une zone précise à lire, ou lire l&apos;écran entier
+        directement.
+      </p>
+      <div
+        className="crop-container"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+      >
+        <img
+          ref={imgRef}
+          src={imageUrl}
+          alt="Capture d'écran"
+          className="crop-image"
+          draggable={false}
+        />
+        {rect && <div className="crop-selection" style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }} />}
+      </div>
+      <button type="button" className="big-button" onClick={onReadAll}>
+        🔊 Lire tout l&apos;écran
+      </button>
+      {hasSelection && (
+        <button type="button" className="big-button secondary" onClick={handleConfirmSelection}>
+          ✂️ Lire seulement la zone sélectionnée
+        </button>
+      )}
+    </div>
   );
 }
 
